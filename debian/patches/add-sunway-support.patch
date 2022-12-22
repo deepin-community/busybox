@@ -1,0 +1,29 @@
+Origin: uos
+Last-Update: 2022-05-20
+
+--- busybox-1.30.1.orig/modutils/modutils-24.c
++++ busybox-1.30.1/modutils/modutils-24.c
+@@ -78,6 +78,14 @@
+ #define ELFCLASSM      ELFCLASS64
+ #endif
+ 
++/* sw_64 */
++#if defined(__sw_64__)
++#define MATCH_MACHINE(x) (x == EM_SW_64)
++#define SHT_RELM       SHT_RELA
++#define Elf64_RelM     Elf64_Rela
++#define ELFCLASSM      ELFCLASS64
++#endif
++
+ /* ARM support */
+ #if defined(__arm__)
+ #define MATCH_MACHINE(x) (x == EM_ARM)
+@@ -405,7 +413,7 @@ struct new_module {
+ 	unsigned tgt_long cleanup;
+ 	unsigned tgt_long ex_table_start;
+ 	unsigned tgt_long ex_table_end;
+-#ifdef __alpha__
++#if defined(__alpha__) || defined(__sw_64__)
+ 	unsigned tgt_long gp;
+ #endif
+ 	/* Everything after here is extension.  */
