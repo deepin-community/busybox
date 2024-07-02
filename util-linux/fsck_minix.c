@@ -321,7 +321,7 @@ static void die(const char *str)
 {
 	if (termios_set)
 		tcsetattr_stdin_TCSANOW(&sv_termios);
-	bb_error_msg_and_die("%s", str);
+	bb_simple_error_msg_and_die(str);
 }
 
 static void push_filename(const char *name)
@@ -423,7 +423,7 @@ static void check_mount(void)
 			cont = ask("Do you really want to continue", 0);
 		if (!cont) {
 			puts("Check aborted");
-			exit(EXIT_SUCCESS);
+			exit_SUCCESS();
 		}
 	}
 }

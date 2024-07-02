@@ -34,7 +34,7 @@ struct d6_packet {
 		uint8_t d6_msg_type;
 		uint32_t d6_xid32;
 	} d6_u;
-	uint8_t d6_options[576 - sizeof(struct iphdr) - sizeof(struct udphdr) - 4
+	uint8_t d6_options[576 - sizeof(struct ip6_hdr) - sizeof(struct udphdr) - 4
 			+ CONFIG_UDHCPC_SLACK_FOR_BUGGY_SERVERS];
 } PACKED;
 #define d6_msg_type d6_u.d6_msg_type
@@ -63,28 +63,45 @@ struct d6_option {
 
 #define D6_OPT_CLIENTID       1
 #define D6_OPT_SERVERID       2
+/* "Identity Association for Non-temporary Addresses",
+ * also known as a "network interface" in plain English */
 #define D6_OPT_IA_NA          3
-#define D6_OPT_IA_TA          4
+/* "Identity Association for the Temporary Addresses".
+ * Presumably this is a "network interface with only link-local addresses".
+ * Why would DHCPv6 server assign such addresses, I have no idea. */
+//#define D6_OPT_IA_TA          4
+/* "IA Address", an IPv6 address */
 #define D6_OPT_IAADDR         5
+/* Option "Option Request Option". From the owners of a doggy dog named Dog? */
 #define D6_OPT_ORO            6
-#define D6_OPT_PREFERENCE     7
+//#define D6_OPT_PREFERENCE     7
 #define D6_OPT_ELAPSED_TIME   8
-#define D6_OPT_RELAY_MSG      9
-#define D6_OPT_AUTH          11
-#define D6_OPT_UNICAST       12
+//#define D6_OPT_RELAY_MSG      9
+//#define D6_OPT_AUTH          11
+/* "The server sends this option to a client to indicate to the client
+ * that it is allowed to unicast messages to the server."
+ * Contains IPv6 address to send packets to. */
+//#define D6_OPT_UNICAST       12
+/* "A Status Code option may appear in the options field of a DHCP
+ * message and/or in the options field of another option." */
 #define D6_OPT_STATUS_CODE   13
-#define D6_OPT_RAPID_COMMIT  14
-#define D6_OPT_USER_CLASS    15
-#define D6_OPT_VENDOR_CLASS  16
-#define D6_OPT_VENDOR_OPTS   17
-#define D6_OPT_INTERFACE_ID  18
-#define D6_OPT_RECONF_MSG    19
-#define D6_OPT_RECONF_ACCEPT 20
+/* "A client MAY include this option in a Solicit message if the client
+ * is prepared to perform the Solicit-Reply message exchange..." */
+//#define D6_OPT_RAPID_COMMIT  14	/* zero-length option */
+//#define D6_OPT_USER_CLASS    15
+//#define D6_OPT_VENDOR_CLASS  16
+//#define D6_OPT_VENDOR_OPTS   17
+//#define D6_OPT_INTERFACE_ID  18
+//#define D6_OPT_RECONF_MSG    19
+//#define D6_OPT_RECONF_ACCEPT 20
 
 #define D6_OPT_DNS_SERVERS   23
 #define D6_OPT_DOMAIN_LIST   24
 
+/* RFC 3633 "Identity Association for Prefix Delegation".
+ * This option says that client wants to get an IPv6 prefix */
 #define D6_OPT_IA_PD         25
+/* Response from the server comes in this one */
 #define D6_OPT_IAPREFIX      26
 
 /* RFC 4704 "The DHCPv6 Client FQDN Option"
@@ -141,11 +158,16 @@ struct client6_data_t {
 	unsigned env_idx;
 	/* link-local IPv6 address */
 	struct in6_addr ll_ip6;
-};
+} FIX_ALIASING;
 
 #define client6_data (*(struct client6_data_t*)(&bb_common_bufsiz1[COMMON_BUFSIZE - sizeof(struct client6_data_t)]))
 
-int FAST_FUNC d6_read_interface(const char *interface, int *ifindex, struct in6_addr *nip6, uint8_t *mac);
+int FAST_FUNC d6_read_interface(
+		const char *interface,
+		int *ifindex,
+		struct in6_addr *nip6,
+		uint8_t *mac
+);
 
 int FAST_FUNC d6_listen_socket(int port, const char *inf);
 
@@ -154,18 +176,16 @@ int FAST_FUNC d6_recv_kernel_packet(
 		struct d6_packet *packet, int fd
 );
 
-int FAST_FUNC d6_send_raw_packet(
+int FAST_FUNC d6_send_raw_packet_from_client_data_ifindex(
 		struct d6_packet *d6_pkt, unsigned d6_pkt_size,
 		struct in6_addr *src_ipv6, int source_port,
-		struct in6_addr *dst_ipv6, int dest_port, const uint8_t *dest_arp,
-		int ifindex
+		struct in6_addr *dst_ipv6, int dest_port, const uint8_t *dest_arp
 );
 
-int FAST_FUNC d6_send_kernel_packet(
+int FAST_FUNC d6_send_kernel_packet_from_client_data_ifindex(
 		struct d6_packet *d6_pkt, unsigned d6_pkt_size,
 		struct in6_addr *src_ipv6, int source_port,
-		struct in6_addr *dst_ipv6, int dest_port,
-		int ifindex
+		struct in6_addr *dst_ipv6, int dest_port
 );
 
 #if defined CONFIG_UDHCP_DEBUG && CONFIG_UDHCP_DEBUG >= 2

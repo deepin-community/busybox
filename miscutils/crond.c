@@ -63,7 +63,7 @@
 //kbuild:lib-$(CONFIG_CROND) += crond.o
 
 //usage:#define crond_trivial_usage
-//usage:       "-fbS -l N " IF_FEATURE_CROND_D("-d N ") "-L LOGFILE -c DIR"
+//usage:       "[-fbS] [-l N] " IF_FEATURE_CROND_D("[-d N] ") "[-L LOGFILE] [-c DIR]"
 //usage:#define crond_full_usage "\n\n"
 //usage:       "	-f	Foreground"
 //usage:     "\n	-b	Background (default)"
@@ -125,6 +125,7 @@ typedef struct CronLine {
 	char *cl_mailto;                /* whom to mail results, may be NULL */
 #endif
 	char *cl_shell;
+	char *cl_path;
 	/* ordered by size, not in natural order. makes code smaller: */
 	char cl_Dow[7];                 /* 0-6, beginning sunday */
 	char cl_Mons[12];               /* 0-11 */
@@ -181,9 +182,7 @@ static void crondlog(unsigned level, const char *msg, va_list va)
 		 * need not touch syslog_level
 		 * (they are ok with LOG_ERR default).
 		 */
-		syslog_level = LOG_INFO;
-		bb_verror_msg(msg, va, /* strerr: */ NULL);
-		syslog_level = LOG_ERR;
+		bb_vinfo_msg(msg, va);
 	}
 }
 
@@ -423,6 +422,7 @@ static void load_crontab(const char *fileName)
 	char *mailTo = NULL;
 #endif
 	char *shell = NULL;
+	char *path = NULL;
 
 	delete_cronfile(fileName);
 
@@ -472,7 +472,12 @@ static void load_crontab(const char *fileName)
 				shell = xstrdup(&tokens[0][6]);
 				continue;
 			}
-//TODO: handle HOME= too? "man crontab" says:
+			if (is_prefixed_with(tokens[0], "PATH=")) {
+				free(path);
+				path = xstrdup(&tokens[0][5]);
+				continue;
+			}
+//TODO: handle HOME= too? Better yet, handle arbitrary ENVVARs? "man crontab" says:
 //name = value
 //
 //where the spaces around the equal-sign (=) are optional, and any subsequent
@@ -482,8 +487,8 @@ static void load_crontab(const char *fileName)
 //
 //Several environment variables are set up automatically by the cron(8) daemon.
 //SHELL is set to /bin/sh, and LOGNAME and HOME are set from the /etc/passwd
-//line of the crontab's owner. HOME and SHELL may be overridden by settings
-//in the crontab; LOGNAME may not.
+//line of the crontab's owner.  HOME, SHELL, and PATH may be overridden by
+//settings in the crontab; LOGNAME may not.
 
 #if ENABLE_FEATURE_CROND_SPECIAL_TIMES
 			if (tokens[0][0] == '@') {
@@ -494,7 +499,7 @@ static void load_crontab(const char *fileName)
 					const char *name;
 					const char tokens[8];
 				} SpecialEntry;
-				static const SpecialEntry SpecAry[] = {
+				static const SpecialEntry SpecAry[] ALIGN8 = {
 					/*              hour  day   month weekday */
 					{ "yearly",     "0\0" "1\0" "1\0" "*" },
 					{ "annually",   "0\0" "1\0" "1\0" "*" },
@@ -569,6 +574,7 @@ static void load_crontab(const char *fileName)
 			line->cl_mailto = xstrdup(mailTo);
 #endif
 			line->cl_shell = xstrdup(shell);
+			line->cl_path = xstrdup(path);
 			/* copy command */
 			line->cl_cmd = xstrdup(tokens[5]);
 			pline = &line->cl_next;
@@ -655,21 +661,22 @@ static void safe_setenv(char **pvar_val, const char *var, const char *val)
 }
 #endif
 
-static void set_env_vars(struct passwd *pas, const char *shell)
+static void set_env_vars(struct passwd *pas, const char *shell, const char *path)
 {
 	/* POSIX requires crond to set up at least HOME, LOGNAME, PATH, SHELL.
-	 * We assume crond inherited suitable PATH.
 	 */
 #if SETENV_LEAKS
 	safe_setenv(&G.env_var_logname, "LOGNAME", pas->pw_name);
 	safe_setenv(&G.env_var_user, "USER", pas->pw_name);
 	safe_setenv(&G.env_var_home, "HOME", pas->pw_dir);
 	safe_setenv(&G.env_var_shell, "SHELL", shell);
+	if (path) safe_setenv(&G.env_var_shell, "PATH", path);
 #else
 	xsetenv("LOGNAME", pas->pw_name);
 	xsetenv("USER", pas->pw_name);
 	xsetenv("HOME", pas->pw_dir);
 	xsetenv("SHELL", shell);
+	if (path) xsetenv("PATH", path);
 #endif
 }
 
@@ -677,8 +684,7 @@ static void change_user(struct passwd *pas)
 {
 	/* careful: we're after vfork! */
 	change_identity(pas); /* - initgroups, setgid, setuid */
-	if (chdir(pas->pw_dir) < 0) {
-		bb_error_msg("can't change directory to '%s'", pas->pw_dir);
+	if (chdir_or_warn(pas->pw_dir) != 0) {
 		xchdir(CRON_DIR);
 	}
 }
@@ -704,7 +710,7 @@ fork_job(const char *user, int mailFd, CronLine *line, bool run_sendmail)
 	shell = line->cl_shell ? line->cl_shell : G.default_shell;
 	prog = run_sendmail ? SENDMAIL : shell;
 
-	set_env_vars(pas, shell);
+	set_env_vars(pas, shell, NULL); /* don't use crontab's PATH for sendmail */
 
 	sv_logmode = logmode;
 	pid = vfork();
@@ -733,7 +739,7 @@ fork_job(const char *user, int mailFd, CronLine *line, bool run_sendmail)
 	logmode = sv_logmode;
 
 	if (pid < 0) {
-		bb_perror_msg("vfork");
+		bb_simple_perror_msg("vfork");
  err:
 		pid = 0;
 	} /* else: PARENT, FORK SUCCESS */
@@ -848,7 +854,7 @@ static pid_t start_one_job(const char *user, CronLine *line)
 
 	/* Prepare things before vfork */
 	shell = line->cl_shell ? line->cl_shell : G.default_shell;
-	set_env_vars(pas, shell);
+	set_env_vars(pas, shell, line->cl_path);
 
 	/* Fork as the user in question and run program */
 	pid = vfork();
@@ -863,7 +869,7 @@ static pid_t start_one_job(const char *user, CronLine *line)
 		bb_error_msg_and_die("can't execute '%s' for user %s", shell, user);
 	}
 	if (pid < 0) {
-		bb_perror_msg("vfork");
+		bb_simple_perror_msg("vfork");
  err:
 		pid = 0;
 	}
@@ -1056,7 +1062,7 @@ int crond_main(int argc UNUSED_PARAM, char **argv)
 
 	log8("crond (busybox "BB_VER") started, log level %d", G.log_level);
 	rescan_crontab_dir();
-	write_pidfile(CONFIG_PID_FILE_PATH "/crond.pid");
+	write_pidfile_std_path_and_ext("crond");
 #if ENABLE_FEATURE_CROND_SPECIAL_TIMES
 	if (touch_reboot_file())
 		start_jobs(START_ME_REBOOT); /* start @reboot entries, if any */
@@ -1108,7 +1114,7 @@ int crond_main(int argc UNUSED_PARAM, char **argv)
 		process_cron_update_file();
 		log5("wakeup dt=%ld", dt);
 		if (dt < -60 * 60 || dt > 60 * 60) {
-			bb_error_msg("time disparity of %ld minutes detected", dt / 60);
+			bb_info_msg("time disparity of %ld minutes detected", dt / 60);
 			/* and we do not run any jobs in this case */
 		} else if (dt > 0) {
 			/* Usual case: time advances forward, as expected */

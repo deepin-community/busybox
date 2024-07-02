@@ -222,8 +222,9 @@ enum {
 	OPT_d = (1 << 0),
 	OPT_n = (1 << 1),
 	OPT_b = (1 << 2),
-	OPT_m = (1 << 3),
-	OPT_EOF = (1 << 4), /* pseudo: "we saw EOF in stdin" */
+	OPT_H = (1 << 3),
+	OPT_m = (1 << 4),
+	OPT_EOF = (1 << 5), /* pseudo: "we saw EOF in stdin" */
 };
 #define OPT_BATCH_MODE (option_mask32 & OPT_b)
 
@@ -688,6 +689,9 @@ static NOINLINE void display_process_list(int lines_rem, int scr_width)
 		lines_rem = ntop - G_scroll_ofs;
 	s = top + G_scroll_ofs;
 	while (--lines_rem >= 0) {
+		int n;
+		char *ppu;
+		char ppubuf[sizeof(int)*3 * 2 + 12];
 		char vsz_str_buf[8];
 		unsigned col;
 
@@ -698,12 +702,36 @@ static NOINLINE void display_process_list(int lines_rem, int scr_width)
 
 		smart_ulltoa5(s->vsz, vsz_str_buf, " mgtpezy");
 		/* PID PPID USER STAT VSZ %VSZ [%CPU] COMMAND */
+		n = sprintf(ppubuf, "%5u %5u %-8.8s", s->pid, s->ppid, get_cached_username(s->uid));
+		ppu = ppubuf;
+		if (n != 6+6+8) {
+			/* Format PID PPID USER part into 6+6+8 chars:
+			 * shrink PID/PPID if possible, then truncate USER
+			 */
+			char *p, *pp;
+			if (*ppu == ' ') {
+				do {
+					ppu++, n--;
+					if (n == 6+6+8)
+						goto shortened;
+				} while (*ppu == ' ');
+			}
+			pp = p = skip_non_whitespace(ppu) + 1;
+			if (*p == ' ') {
+				do
+					p++, n--;
+				while (n != 6+6+8 && *p == ' ');
+				overlapping_strcpy(pp, p); /* shrink PPID */
+			}
+			ppu[6+6+8] = '\0'; /* truncate USER */
+		}
+ shortened:
 		col = snprintf(line_buf, scr_width,
-				"\n" "%5u%6u %-8.8s %s  %.5s" FMT
+				"\n" "%s %s  %.5s" FMT
 				IF_FEATURE_TOP_SMP_PROCESS(" %3d")
 				IF_FEATURE_TOP_CPU_USAGE_PERCENTAGE(FMT)
 				" ",
-				s->pid, s->ppid, get_cached_username(s->uid),
+				ppu,
 				s->state, vsz_str_buf,
 				SHOW_STAT(pmem)
 				IF_FEATURE_TOP_SMP_PROCESS(, s->last_seen_on_cpu)
@@ -711,7 +739,7 @@ static NOINLINE void display_process_list(int lines_rem, int scr_width)
 		);
 		if ((int)(scr_width - col) > 1)
 			read_cmdline(line_buf + col, scr_width - col, s->pid, s->comm);
-		fputs(line_buf, stdout);
+		fputs_stdout(line_buf);
 		/* printf(" %d/%d %lld/%lld", s->pcpu, total_pcpu,
 			cur_jif.busy - prev_jif.busy, cur_jif.total - prev_jif.total); */
 		s++;
@@ -851,8 +879,11 @@ static NOINLINE void display_topmem_process_list(int lines_rem, int scr_width)
 		lines_rem = ntop - G_scroll_ofs;
 	while (--lines_rem >= 0) {
 		/* PID VSZ VSZRW RSS (SHR) DIRTY (SHR) COMMAND */
-		ulltoa6_and_space(s->pid     , &line_buf[0*6]);
+		int n = sprintf(line_buf, "%5u ", s->pid);
 		ulltoa6_and_space(s->vsz     , &line_buf[1*6]);
+		if (n > 7 || (n == 7 && line_buf[6] != ' '))
+			/* PID and VSZ are clumped together, truncate PID */
+			line_buf[5] = '.';
 		ulltoa6_and_space(s->vszrw   , &line_buf[2*6]);
 		ulltoa6_and_space(s->rss     , &line_buf[3*6]);
 		ulltoa6_and_space(s->rss_sh  , &line_buf[4*6]);
@@ -912,7 +943,7 @@ static unsigned handle_input(unsigned scan_mask, duration_t interval)
 	while (1) {
 		int32_t c;
 
-		c = read_key(STDIN_FILENO, G.kbd_input, interval * 1000);
+		c = safe_read_key(STDIN_FILENO, G.kbd_input, interval * 1000);
 		if (c == -1 && errno != EAGAIN) {
 			/* error/EOF */
 			option_mask32 |= OPT_EOF;
@@ -978,6 +1009,11 @@ static unsigned handle_input(unsigned scan_mask, duration_t interval)
 		IF_FEATURE_TOPMEM(&& scan_mask != TOPMEM_MASK)
 		) {
 			scan_mask ^= PSSCAN_TASKS;
+#  if ENABLE_FEATURE_TOP_CPU_USAGE_PERCENTAGE
+			free(prev_hist);
+			prev_hist = NULL;
+			prev_hist_count = 0;
+#   endif
 			continue;
 		}
 # endif
@@ -999,10 +1035,10 @@ static unsigned handle_input(unsigned scan_mask, duration_t interval)
 #  if ENABLE_FEATURE_TOPMEM
 		if (c == 's') {
 			scan_mask = TOPMEM_MASK;
+			sort_field = (sort_field + 1) % NUM_SORT_FIELD;
 			free(prev_hist);
 			prev_hist = NULL;
 			prev_hist_count = 0;
-			sort_field = (sort_field + 1) % NUM_SORT_FIELD;
 			continue;
 		}
 #  endif
@@ -1043,11 +1079,12 @@ static unsigned handle_input(unsigned scan_mask, duration_t interval)
 //usage:# define IF_SHOW_THREADS_OR_TOP_SMP(...)
 //usage:#endif
 //usage:#define top_trivial_usage
-//usage:       "[-b] [-nCOUNT] [-dSECONDS]" IF_FEATURE_TOPMEM(" [-m]")
+//usage:       "[-b"IF_FEATURE_TOPMEM("m")IF_FEATURE_SHOW_THREADS("H")"]"
+//usage:       " [-n COUNT] [-d SECONDS]"
 //usage:#define top_full_usage "\n\n"
-//usage:       "Provide a view of process activity in real time."
+//usage:       "Show a view of process activity in real time."
 //usage:   "\n""Read the status of all processes from /proc each SECONDS"
-//usage:   "\n""and display a screenful of them."
+//usage:   "\n""and show a screenful of them."
 //usage:   "\n"
 //usage:	IF_FEATURE_TOP_INTERACTIVE(
 //usage:       "Keys:"
@@ -1068,14 +1105,16 @@ static unsigned handle_input(unsigned scan_mask, duration_t interval)
 //usage:                IF_FEATURE_TOP_SMP_CPU("1: toggle SMP")
 //usage:	)
 //usage:   "\n""	Q,^C: exit"
-//usage:   "\n"
 //usage:   "\n""Options:"
 //usage:	)
 //usage:   "\n""	-b	Batch mode"
 //usage:   "\n""	-n N	Exit after N iterations"
-//usage:   "\n""	-d N	Delay between updates"
+//usage:   "\n""	-d SEC	Delay between updates"
 //usage:	IF_FEATURE_TOPMEM(
 //usage:   "\n""	-m	Same as 's' key"
+//usage:	)
+//usage:	IF_FEATURE_SHOW_THREADS(
+//usage:   "\n""	-H	Show threads"
 //usage:	)
 
 /* Interactive testing:
@@ -1111,7 +1150,8 @@ int top_main(int argc UNUSED_PARAM, char **argv)
 
 	/* all args are options; -n NUM */
 	make_all_argv_opts(argv); /* options can be specified w/o dash */
-	col = getopt32(argv, "d:n:b"IF_FEATURE_TOPMEM("m"), &str_interval, &str_iterations);
+	col = getopt32(argv, "d:n:bHm", &str_interval, &str_iterations);
+	/* NB: -m and -H are accepted even if not configured */
 #if ENABLE_FEATURE_TOPMEM
 	if (col & OPT_m) /* -m (busybox specific) */
 		scan_mask = TOPMEM_MASK;
@@ -1130,6 +1170,11 @@ int top_main(int argc UNUSED_PARAM, char **argv)
 			str_iterations++;
 		iterations = xatou(str_iterations);
 	}
+#if ENABLE_FEATURE_SHOW_THREADS
+	if (col & OPT_H) {
+		scan_mask |= PSSCAN_TASKS;
+	}
+#endif
 
 	/* change to /proc */
 	xchdir("/proc");
@@ -1219,7 +1264,7 @@ int top_main(int argc UNUSED_PARAM, char **argv)
 #endif
 		} /* end of "while we read /proc" */
 		if (ntop == 0) {
-			bb_error_msg("no process info in /proc");
+			bb_simple_error_msg("no process info in /proc");
 			break;
 		}
 
