@@ -26,7 +26,7 @@
 /* These strings are arranged so that odd ones
  * result in security_setenforce(1) being done,
  * the rest will do security_setenforce(0) */
-static const char *const setenforce_cmd[] = {
+static const char *const setenforce_cmd[] ALIGN_PTR = {
 	"0",
 	"1",
 	"permissive",
@@ -49,7 +49,7 @@ int setenforce_main(int argc UNUSED_PARAM, char **argv)
 			continue;
 		rc = security_setenforce(i & 1);
 		if (rc < 0)
-			bb_perror_msg_and_die("setenforce() failed");
+			bb_simple_perror_msg_and_die("setenforce() failed");
 		return 0;
 	}
 

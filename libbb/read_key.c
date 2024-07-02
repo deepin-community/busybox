@@ -126,7 +126,10 @@ int64_t FAST_FUNC read_key(int fd, char *buffer, int timeout)
 		 * if fd can be in non-blocking mode.
 		 */
 		if (timeout >= -1) {
-			if (safe_poll(&pfd, 1, timeout) == 0) {
+			n = poll(&pfd, 1, timeout);
+			if (n < 0 && errno == EINTR)
+				return n;
+			if (n == 0) {
 				/* Timed out */
 				errno = EAGAIN;
 				return -1;
@@ -138,7 +141,7 @@ int64_t FAST_FUNC read_key(int fd, char *buffer, int timeout)
 		 * When we were reading 3 bytes here, we were eating
 		 * "li" too, and cat was getting wrong input.
 		 */
-		n = safe_read(fd, buffer, 1);
+		n = read(fd, buffer, 1);
 		if (n <= 0)
 			return -1;
 	}
@@ -259,7 +262,8 @@ int64_t FAST_FUNC read_key(int fd, char *buffer, int timeout)
 
 			buffer[-1] = 0;
 			/* Pack into "1 <row15bits> <col16bits>" 32-bit sequence */
-			col |= (((-1 << 15) | row) << 16);
+			row |= ((unsigned)(-1) << 15);
+			col |= (row << 16);
 			/* Return it in high-order word */
 			return ((int64_t) col << 32) | (uint32_t)KEYCODE_CURSOR_POS;
 		}
@@ -281,6 +285,16 @@ int64_t FAST_FUNC read_key(int fd, char *buffer, int timeout)
 	 */
 	buffer[-1] = 0;
 	goto start_over;
+}
+
+int64_t FAST_FUNC safe_read_key(int fd, char *buffer, int timeout)
+{
+	int64_t r;
+	do {
+		/* errno = 0; - read_key does this itself */
+		r = read_key(fd, buffer, timeout);
+	} while (errno == EINTR);
+	return r;
 }
 
 void FAST_FUNC read_key_ungets(char *buffer, const char *str, unsigned len)

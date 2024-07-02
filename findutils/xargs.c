@@ -80,9 +80,11 @@
 /* This is a NOEXEC applet. Be very careful! */
 
 
-//#define dbg_msg(...) bb_error_msg(__VA_ARGS__)
-#define dbg_msg(...) ((void)0)
-
+#if 0
+# define dbg_msg(...) bb_error_msg(__VA_ARGS__)
+#else
+# define dbg_msg(...) ((void)0)
+#endif
 
 #ifdef TEST
 # ifndef ENABLE_FEATURE_XARGS_SUPPORT_CONFIRMATION
@@ -109,23 +111,72 @@ struct globals {
 #endif
 	const char *eof_str;
 	int idx;
+	int fd_tty;
+	int fd_stdin;
 #if ENABLE_FEATURE_XARGS_SUPPORT_PARALLEL
 	int running_procs;
 	int max_procs;
 #endif
 	smalluint xargs_exitcode;
+#if ENABLE_FEATURE_XARGS_SUPPORT_QUOTES
+#define NORM      0
+#define QUOTE     1
+#define BACKSLASH 2
+#define SPACE     4
+	smalluint process_stdin__state;
+	char process_stdin__q;
+#endif
 } FIX_ALIASING;
 #define G (*(struct globals*)bb_common_bufsiz1)
 #define INIT_G() do { \
 	setup_common_bufsiz(); \
-	G.eof_str = NULL; /* need to clear by hand because we are NOEXEC applet */ \
+	IF_FEATURE_XARGS_SUPPORT_REPL_STR(G.repl_str = "{}";) \
+	IF_FEATURE_XARGS_SUPPORT_REPL_STR(G.eol_ch = '\n';) \
+	/* Even zero values are set because we are NOEXEC applet */ \
+	G.eof_str = NULL; \
 	G.idx = 0; \
 	IF_FEATURE_XARGS_SUPPORT_PARALLEL(G.running_procs = 0;) \
 	IF_FEATURE_XARGS_SUPPORT_PARALLEL(G.max_procs = 1;) \
 	G.xargs_exitcode = 0; \
-	IF_FEATURE_XARGS_SUPPORT_REPL_STR(G.repl_str = "{}";) \
-	IF_FEATURE_XARGS_SUPPORT_REPL_STR(G.eol_ch = '\n';) \
+	IF_FEATURE_XARGS_SUPPORT_QUOTES(G.process_stdin__state = NORM;) \
+	IF_FEATURE_XARGS_SUPPORT_QUOTES(G.process_stdin__q = '\0';) \
 } while (0)
+
+/* Correct regardless of combination of CONFIG_xxx */
+enum {
+	OPTBIT_VERBOSE = 0,
+	OPTBIT_NO_EMPTY,
+	OPTBIT_UPTO_NUMBER,
+	OPTBIT_UPTO_SIZE,
+	OPTBIT_EOF_STRING,
+	OPTBIT_EOF_STRING1,
+	OPTBIT_STDIN_TTY,
+	IF_FEATURE_XARGS_SUPPORT_CONFIRMATION(OPTBIT_INTERACTIVE,)
+	IF_FEATURE_XARGS_SUPPORT_TERMOPT(     OPTBIT_TERMINATE  ,)
+	IF_FEATURE_XARGS_SUPPORT_ZERO_TERM(   OPTBIT_ZEROTERM   ,)
+	IF_FEATURE_XARGS_SUPPORT_REPL_STR(    OPTBIT_REPLSTR    ,)
+	IF_FEATURE_XARGS_SUPPORT_REPL_STR(    OPTBIT_REPLSTR1   ,)
+
+	OPT_VERBOSE     = 1 << OPTBIT_VERBOSE    ,
+	OPT_NO_EMPTY    = 1 << OPTBIT_NO_EMPTY   ,
+	OPT_UPTO_NUMBER = 1 << OPTBIT_UPTO_NUMBER,
+	OPT_UPTO_SIZE   = 1 << OPTBIT_UPTO_SIZE  ,
+	OPT_EOF_STRING  = 1 << OPTBIT_EOF_STRING , /* GNU: -e[<param>] */
+	OPT_EOF_STRING1 = 1 << OPTBIT_EOF_STRING1, /* SUS: -E<param> */
+	OPT_STDIN_TTY   = 1 << OPTBIT_STDIN_TTY,
+	OPT_INTERACTIVE = IF_FEATURE_XARGS_SUPPORT_CONFIRMATION((1 << OPTBIT_INTERACTIVE)) + 0,
+	OPT_TERMINATE   = IF_FEATURE_XARGS_SUPPORT_TERMOPT(     (1 << OPTBIT_TERMINATE  )) + 0,
+	OPT_ZEROTERM    = IF_FEATURE_XARGS_SUPPORT_ZERO_TERM(   (1 << OPTBIT_ZEROTERM   )) + 0,
+	OPT_REPLSTR     = IF_FEATURE_XARGS_SUPPORT_REPL_STR(    (1 << OPTBIT_REPLSTR    )) + 0,
+	OPT_REPLSTR1    = IF_FEATURE_XARGS_SUPPORT_REPL_STR(    (1 << OPTBIT_REPLSTR1   )) + 0,
+};
+#define OPTION_STR "+trn:s:e::E:o" \
+	IF_FEATURE_XARGS_SUPPORT_CONFIRMATION("p") \
+	IF_FEATURE_XARGS_SUPPORT_TERMOPT(     "x") \
+	IF_FEATURE_XARGS_SUPPORT_ZERO_TERM(   "0") \
+	IF_FEATURE_XARGS_SUPPORT_REPL_STR(    "I:i::") \
+	IF_FEATURE_XARGS_SUPPORT_PARALLEL(    "P:+") \
+	IF_FEATURE_XARGS_SUPPORT_ARGS_FILE(   "a:")
 
 
 /*
@@ -137,6 +188,9 @@ struct globals {
 static int xargs_exec(void)
 {
 	int status;
+
+	if (option_mask32 & OPT_STDIN_TTY)
+		xdup2(G.fd_tty, STDIN_FILENO);
 
 #if !ENABLE_FEATURE_XARGS_SUPPORT_PARALLEL
 	status = spawn_and_wait(G.args);
@@ -224,6 +278,8 @@ static int xargs_exec(void)
  ret:
 	if (status != 0)
 		G.xargs_exitcode = status;
+	if (option_mask32 & OPT_STDIN_TTY)
+		xdup2(G.fd_stdin, STDIN_FILENO);
 	return status;
 }
 
@@ -257,12 +313,8 @@ static void store_param(char *s)
 #if ENABLE_FEATURE_XARGS_SUPPORT_QUOTES
 static char* FAST_FUNC process_stdin(int n_max_chars, int n_max_arg, char *buf)
 {
-#define NORM      0
-#define QUOTE     1
-#define BACKSLASH 2
-#define SPACE     4
-	char q = '\0';             /* quote char */
-	char state = NORM;
+#define q     G.process_stdin__q
+#define state G.process_stdin__state
 	char *s = buf;             /* start of the word */
 	char *p = s + strlen(buf); /* end of the word */
 
@@ -308,6 +360,7 @@ static char* FAST_FUNC process_stdin(int n_max_chars, int n_max_arg, char *buf)
 			}
 		}
 		if (state == SPACE) {   /* word's delimiter or EOF detected */
+			state = NORM;
 			if (q) {
 				bb_error_msg_and_die("unmatched %s quote",
 					q == '\'' ? "single" : "double");
@@ -328,7 +381,6 @@ static char* FAST_FUNC process_stdin(int n_max_chars, int n_max_arg, char *buf)
 			if (n_max_arg == 0) {
 				goto ret;
 			}
-			state = NORM;
 		}
 		if (p == buf) {
 			goto ret;
@@ -339,6 +391,8 @@ static char* FAST_FUNC process_stdin(int n_max_chars, int n_max_arg, char *buf)
 	/* store_param(NULL) - caller will do it */
 	dbg_msg("return:'%s'", s);
 	return s;
+#undef q
+#undef state
 }
 #else
 /* The variant does not support single quotes, double quotes or backslash */
@@ -457,9 +511,18 @@ static char* FAST_FUNC process_stdin_with_replace(int n_max_chars, int n_max_arg
 
 	while (1) {
 		int c = getchar();
+		if (p == buf) {
+			if (c == EOF)
+				goto ret; /* last line is empty, return "" */
+			if (c == G.eol_ch)
+				continue; /* empty line, ignore */
+			/* Skip leading whitespace of each line: try
+			 * echo -e ' \t\v1 2 3 ' | xargs -I% echo '[%]'
+			 */
+			if (ISSPACE(c))
+				continue;
+		}
 		if (c == EOF || c == G.eol_ch) {
-			if (p == buf)
-				goto ret; /* empty line */
 			c = '\0';
 		}
 		*p++ = c;
@@ -516,23 +579,24 @@ static int xargs_ask_confirmation(void)
 //usage:       "[OPTIONS] [PROG ARGS]"
 //usage:#define xargs_full_usage "\n\n"
 //usage:       "Run PROG on every item given by stdin\n"
-//usage:	IF_FEATURE_XARGS_SUPPORT_CONFIRMATION(
-//usage:     "\n	-p	Ask user whether to run each command"
-//usage:	)
-//usage:     "\n	-r	Don't run command if input is empty"
 //usage:	IF_FEATURE_XARGS_SUPPORT_ZERO_TERM(
-//usage:     "\n	-0	Input is separated by NULs"
+//usage:     "\n	-0	NUL terminated input"
 //usage:	)
 //usage:	IF_FEATURE_XARGS_SUPPORT_ARGS_FILE(
 //usage:     "\n	-a FILE	Read from FILE instead of stdin"
 //usage:	)
+//usage:     "\n	-o	Reopen stdin as /dev/tty"
+//usage:     "\n	-r	Don't run command if input is empty"
 //usage:     "\n	-t	Print the command on stderr before execution"
-//usage:     "\n	-e[STR]	STR stops input processing"
-//usage:     "\n	-n N	Pass no more than N args to PROG"
-//usage:     "\n	-s N	Pass command line of no more than N bytes"
+//usage:	IF_FEATURE_XARGS_SUPPORT_CONFIRMATION(
+//usage:     "\n	-p	Ask user whether to run each command"
+//usage:	)
+//usage:     "\n	-E STR,-e[STR]	STR stops input processing"
 //usage:	IF_FEATURE_XARGS_SUPPORT_REPL_STR(
 //usage:     "\n	-I STR	Replace STR within PROG ARGS with input line"
 //usage:	)
+//usage:     "\n	-n N	Pass no more than N args to PROG"
+//usage:     "\n	-s N	Pass command line of no more than N bytes"
 //usage:	IF_FEATURE_XARGS_SUPPORT_PARALLEL(
 //usage:     "\n	-P N	Run up to N PROGs in parallel"
 //usage:	)
@@ -542,40 +606,6 @@ static int xargs_ask_confirmation(void)
 //usage:#define xargs_example_usage
 //usage:       "$ ls | xargs gzip\n"
 //usage:       "$ find . -name '*.c' -print | xargs rm\n"
-
-/* Correct regardless of combination of CONFIG_xxx */
-enum {
-	OPTBIT_VERBOSE = 0,
-	OPTBIT_NO_EMPTY,
-	OPTBIT_UPTO_NUMBER,
-	OPTBIT_UPTO_SIZE,
-	OPTBIT_EOF_STRING,
-	OPTBIT_EOF_STRING1,
-	IF_FEATURE_XARGS_SUPPORT_CONFIRMATION(OPTBIT_INTERACTIVE,)
-	IF_FEATURE_XARGS_SUPPORT_TERMOPT(     OPTBIT_TERMINATE  ,)
-	IF_FEATURE_XARGS_SUPPORT_ZERO_TERM(   OPTBIT_ZEROTERM   ,)
-	IF_FEATURE_XARGS_SUPPORT_REPL_STR(    OPTBIT_REPLSTR    ,)
-	IF_FEATURE_XARGS_SUPPORT_REPL_STR(    OPTBIT_REPLSTR1   ,)
-
-	OPT_VERBOSE     = 1 << OPTBIT_VERBOSE    ,
-	OPT_NO_EMPTY    = 1 << OPTBIT_NO_EMPTY   ,
-	OPT_UPTO_NUMBER = 1 << OPTBIT_UPTO_NUMBER,
-	OPT_UPTO_SIZE   = 1 << OPTBIT_UPTO_SIZE  ,
-	OPT_EOF_STRING  = 1 << OPTBIT_EOF_STRING , /* GNU: -e[<param>] */
-	OPT_EOF_STRING1 = 1 << OPTBIT_EOF_STRING1, /* SUS: -E<param> */
-	OPT_INTERACTIVE = IF_FEATURE_XARGS_SUPPORT_CONFIRMATION((1 << OPTBIT_INTERACTIVE)) + 0,
-	OPT_TERMINATE   = IF_FEATURE_XARGS_SUPPORT_TERMOPT(     (1 << OPTBIT_TERMINATE  )) + 0,
-	OPT_ZEROTERM    = IF_FEATURE_XARGS_SUPPORT_ZERO_TERM(   (1 << OPTBIT_ZEROTERM   )) + 0,
-	OPT_REPLSTR     = IF_FEATURE_XARGS_SUPPORT_REPL_STR(    (1 << OPTBIT_REPLSTR    )) + 0,
-	OPT_REPLSTR1    = IF_FEATURE_XARGS_SUPPORT_REPL_STR(    (1 << OPTBIT_REPLSTR1   )) + 0,
-};
-#define OPTION_STR "+trn:s:e::E:" \
-	IF_FEATURE_XARGS_SUPPORT_CONFIRMATION("p") \
-	IF_FEATURE_XARGS_SUPPORT_TERMOPT(     "x") \
-	IF_FEATURE_XARGS_SUPPORT_ZERO_TERM(   "0") \
-	IF_FEATURE_XARGS_SUPPORT_REPL_STR(    "I:i::") \
-	IF_FEATURE_XARGS_SUPPORT_PARALLEL(    "P:+") \
-	IF_FEATURE_XARGS_SUPPORT_ARGS_FILE(   "a:")
 
 int xargs_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int xargs_main(int argc UNUSED_PARAM, char **argv)
@@ -665,7 +695,7 @@ int xargs_main(int argc UNUSED_PARAM, char **argv)
 	}
 	/* Sanity check */
 	if (n_max_chars <= 0) {
-		bb_error_msg_and_die("can't fit single argument within argument list size limit");
+		bb_simple_error_msg_and_die("can't fit single argument within argument list size limit");
 	}
 
 	buf = xzalloc(n_max_chars + 1);
@@ -706,6 +736,13 @@ int xargs_main(int argc UNUSED_PARAM, char **argv)
 			store_param(argv[i]);
 	}
 
+	if (opt & OPT_STDIN_TTY) {
+		G.fd_tty = xopen(CURRENT_TTY, O_RDONLY);
+		close_on_exec_on(G.fd_tty);
+		G.fd_stdin = dup(STDIN_FILENO);
+		close_on_exec_on(G.fd_stdin);
+	}
+
 	initial_idx = G.idx;
 	while (1) {
 		char *rem;
@@ -716,7 +753,7 @@ int xargs_main(int argc UNUSED_PARAM, char **argv)
 
 		if (!G.args[initial_idx]) { /* not even one ARG was added? */
 			if (*rem != '\0')
-				bb_error_msg_and_die("argument line too long");
+				bb_simple_error_msg_and_die("argument line too long");
 			if (opt & OPT_NO_EMPTY)
 				break;
 		}
