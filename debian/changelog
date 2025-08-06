@@ -1,3 +1,9 @@
+busybox (1:1.36.1-7deepin1) unstable; urgency=medium
+
+  * tar: fix TOCTOU symlink race condition
+
+ -- Tianyu Chen <sweetyfish@deepin.org>  Wed, 06 Aug 2025 10:25:38 +0800
+
 busybox (1:1.36.1-7) unstable; urgency=medium
 
   * udeb: remove all modutils (kmod-udeb provides better alternatives)
