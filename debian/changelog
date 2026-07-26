@@ -1,3 +1,9 @@
+busybox (1:1.37.0-10.1deepin1) unstable; urgency=medium
+
+  * fix(cve): CVE-2026-38753
+
+ -- deepin-ci-robot <packages@deepin.org>  Sun, 26 Jul 2026 22:16:19 +0800
+
 busybox (1:1.37.0-10.1) unstable; urgency=medium
 
   * Non-maintainer upload.
