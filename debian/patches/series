@@ -31,3 +31,4 @@ netstat-sanitize-argv0-for-p-CVE-2024-58251.patch
 CVE-2026-38753.patch
 CVE-2026-38754.patch
 CVE-2026-38752.patch
+CVE-2026-38755.patch
